@@ -12,41 +12,25 @@ MOVE_INCREMENT = 0.0002
 SPEED = 0.05  # [m/s]
 FORCE = 20.0  # [N]
 
-
 # Initialize robot and gripper
 hostname = '172.16.0.2'
 robot = panda_py.Panda(hostname)
 gripper = panda_py.libfranka.Gripper(hostname)
-
-
 robot.recover()
-
-# Get initial pose
-
 robot.move_to_start()
 gripper.homing()
-current_translation = robot.get_position()
-current_rotation = robot.get_orientation()
-defaultq = robot.q
-
-print("Initial pose:", defaultq)
 
 
 def main():
-    # Initialize current_translation and current_rotation inside main()
+    # Initialize variables inside main()
     current_translation = robot.get_position()
     current_rotation = robot.get_orientation()
 
-    # Initialize video capture and recorder
-    video_capture = cv2.VideoCapture(0)  # Adjust the camera index if needed
-    video_recorder = VideoRecorder.create_h264(
-        fps=30,
-        input_pix_fmt='bgr24',
-        crf=18,
-        thread_type='FRAME',
-        thread_count=1)
+    # Initialize video capture
+    video_capture = cv2.VideoCapture(4)  # Adjust the camera index if needed
     recording = False
     joint_data = []
+    pose_data = []
 
     print("Use Spacemouse to control the robot in Cartesian space.")
     print("Press 'c' to start recording.")
@@ -88,44 +72,63 @@ def main():
                 else:
                     print("Release failed")
 
-            # Check for keyboard input
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('c'):
-                if not recording:
-                    recording = True
-                    video_recorder.start('video_output.mp4')
-                    joint_data = []
-                    print("Recording started.")
-            elif key == ord('s'):
+            # Capture video frame
+            ret, frame = video_capture.read()
+            if ret:
+                # Display the frame
+                cv2.imshow('Recording', frame)
+
+                # Check for keyboard input
+                key = cv2.waitKey(1) & 0xFF
+
+                if key == ord('c'):
+                    if not recording:
+                        recording = True
+                        video_writer = cv2.VideoWriter(
+                            'video_output.avi',
+                            cv2.VideoWriter_fourcc(*'XVID'),
+                            30,
+                            (frame.shape[1], frame.shape[0])
+                        )
+                        joint_data = []
+                        pose_data = []
+                        print("Recording started.")
+                elif key == ord('s'):
+                    if recording:
+                        recording = False
+                        video_writer.release()
+                        np.save('joint_data.npy', np.array(joint_data))
+                        np.save('pose_data.npy', np.array(pose_data))
+                        joint_data = []
+                        pose_data = []
+                        print("Recording stopped.")
+                elif key == ord('q'):
+                    running = False
+                    print("Exiting program.")
+
                 if recording:
-                    recording = False
-                    video_recorder.stop()
-                    np.save('joint_data.npy', np.array(joint_data))
-                    joint_data = []
-                    print("Recording stopped.")
-            elif key == ord('q'):
-                running = False
-                print("Exiting program.")
+                    # Record joint data and end effector poses
+                    timestamp = time.time()
+                    robot_q = robot.q.copy()
+                    ee_pose = robot.get_pose()
+                    joint_data.append((timestamp, robot_q))
+                    pose_data.append((timestamp, ee_pose))
 
-            if recording:
-                # Record joint data
-                timestamp = time.time()
-                robot_q = robot.q.copy()
-                joint_data.append((timestamp, robot_q))
-
-                # Capture and record video frame
-                ret, frame = video_capture.read()
-                if ret:
-                    video_recorder.write_frame(frame)
+                    # Write video frame
+                    video_writer.write(frame)
+            else:
+                print("Failed to read frame from camera.")
 
             # Set robot control
             controller.set_control(current_translation, current_rotation)
             end_time = time.perf_counter()
             loop_duration = end_time - start_time
 
-    # Release resources
-    video_capture.release()
-    cv2.destroyAllWindows()
+        # Release resources
+        if recording:
+            video_writer.release()
+        video_capture.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
