@@ -8,10 +8,10 @@ import numcodecs
 import multiprocessing
 import concurrent.futures
 from tqdm import tqdm
-from diffusion_policy.common.replay_buffer import ReplayBuffer, get_optimal_chunks
-from diffusion_policy.common.cv2_util import get_image_transform
+from common.replay_buffer import ReplayBuffer, get_optimal_chunks
+from common.cv2_util import get_image_transform
 from utils.video_recorder import read_video
-from diffusion_policy.codecs.imagecodecs_numcodecs import (
+from codecs.imagecodecs import (
     register_codecs,
     Jpeg2k
 )

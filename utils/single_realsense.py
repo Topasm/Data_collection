@@ -9,11 +9,11 @@ import multiprocessing as mp
 import cv2
 from threadpoolctl import threadpool_limits
 from multiprocessing.managers import SharedMemoryManager
-from diffusion_policy.common.timestamp_accumulator import get_accumulate_timestamp_idxs
-from diffusion_policy.shared_memory.shared_ndarray import SharedNDArray
-from diffusion_policy.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
-from diffusion_policy.shared_memory.shared_memory_queue import SharedMemoryQueue, Full, Empty
-from diffusion_policy.real_world.video_recorder import VideoRecorder
+from common.timestamp_accumulator import get_accumulate_timestamp_idxs
+from shared_memory.shared_ndarray import SharedNDArray
+from shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
+from shared_memory.shared_memory_queue import SharedMemoryQueue, Full, Empty
+from utils.video_recorder import VideoRecorder
 
 
 class Command(enum.Enum):

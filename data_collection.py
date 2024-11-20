@@ -4,9 +4,6 @@ import panda_py.controllers
 from scipy.spatial.transform import Rotation as R
 import panda_py
 from utils.spacemouse import Spacemouse
-from spatialmath import *
-import roboticstoolbox as rtb
-import threading
 import cv2
 from utils.video_recorder import VideoRecorder
 
@@ -35,10 +32,11 @@ defaultq = robot.q
 print("Initial pose:", defaultq)
 
 
-panda_rtb = rtb.models.Panda()
-
-
 def main():
+    # Initialize current_translation and current_rotation inside main()
+    current_translation = robot.get_position()
+    current_rotation = robot.get_orientation()
+
     # Initialize video capture and recorder
     video_capture = cv2.VideoCapture(0)  # Adjust the camera index if needed
     video_recorder = VideoRecorder.create_h264(
@@ -51,9 +49,9 @@ def main():
     joint_data = []
 
     print("Use Spacemouse to control the robot in Cartesian space.")
-    print("Press button 0 to toggle gripper state (open/close).")
-    print("Press button 1 to grasp an object and button 2 to release.")
-    print("Press button 3 to start/stop recording.")
+    print("Press 'c' to start recording.")
+    print("Press 's' to stop recording.")
+    print("Press 'q' to exit the program.")
 
     with Spacemouse(deadzone=0.3) as sm, robot.create_context(frequency=1000) as ctx:
         running = True
@@ -68,14 +66,12 @@ def main():
             sm_state = sm.get_motion_state_transformed()
             dpos = sm_state[:3] * MOVE_INCREMENT
             drot_xyz = sm_state[3:] * MOVE_INCREMENT * 3
-            drot_xyz = np.array([drot_xyz[0], drot_xyz[1], drot_xyz[2]])
 
             # Update current pose
-            current_translation += np.array([dpos[0], dpos[1], dpos[2]])
-            if drot_xyz is not None:
-                delta_rotation = R.from_euler('xyz', drot_xyz)
-                current_rotation = (
-                    delta_rotation * R.from_quat(current_rotation)).as_quat()
+            current_translation += dpos
+            delta_rotation = R.from_euler('xyz', drot_xyz)
+            current_rotation = (
+                delta_rotation * R.from_quat(current_rotation)).as_quat()
 
             # Handle gripper state changes
             if sm.is_button_pressed(0):
@@ -92,19 +88,24 @@ def main():
                 else:
                     print("Release failed")
 
-            # Handle recording state toggle
-            if sm.is_button_pressed(3):
+            # Check for keyboard input
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('c'):
+                if not recording:
+                    recording = True
+                    video_recorder.start('video_output.mp4')
+                    joint_data = []
+                    print("Recording started.")
+            elif key == ord('s'):
                 if recording:
                     recording = False
                     video_recorder.stop()
                     np.save('joint_data.npy', np.array(joint_data))
                     joint_data = []
                     print("Recording stopped.")
-                else:
-                    recording = True
-                    video_recorder.start('video_output.mp4')
-                    joint_data = []
-                    print("Recording started.")
+            elif key == ord('q'):
+                running = False
+                print("Exiting program.")
 
             if recording:
                 # Record joint data
@@ -122,8 +123,9 @@ def main():
             end_time = time.perf_counter()
             loop_duration = end_time - start_time
 
-    # Release video capture resource
+    # Release resources
     video_capture.release()
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
