@@ -130,14 +130,12 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
                 dpos = sm_state[:3] * (env.max_pos_speed)
                 drot_xyz = sm_state[3:] * (env.max_rot_speed)
 
-                if not sm.is_button_pressed(0):
-                    # translation mode
-                    drot_xyz[:] = 0
-                else:
-                    dpos[:] = 0
-                if not sm.is_button_pressed(1):
-                    # 2D translation mode
-                    dpos[2] = 0
+                drot_xyz[:] = 0
+                if sm.is_button_pressed(0):
+                    env.robot.panda.grip()
+
+                elif sm.is_button_pressed(1):
+                    env.robot.panda.release()
 
                 drot = st.Rotation.from_euler('xyz', drot_xyz)
 

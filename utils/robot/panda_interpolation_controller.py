@@ -17,6 +17,9 @@ import roboticstoolbox as rtb
 from spatialmath import SE3
 from datetime import timedelta, datetime
 
+SPEED = 0.05  # [m/s]
+FORCE = 20.0  # [N]
+
 
 class Command(enum.Enum):
     STOP = 0
@@ -27,8 +30,10 @@ class Command(enum.Enum):
 class FrankaInterface:
     def __init__(self, ip='172.16.0.2'):
         self.robot = panda_py.Panda(ip)
+        self.gripper = panda_py.libfranka.Gripper(ip)
 
         self.robot.recover()
+        self.gripper.homing()
 
     def get_ee_pose(self):
         # Assuming correct attribute names based on inspection
@@ -50,6 +55,13 @@ class FrankaInterface:
     def close(self):
         self.robot.stop_controller()
         pass
+
+    def grip(self):
+        self.gripper.grasp(0.01, speed=SPEED, force=FORCE,
+                           epsilon_inner=0.005, epsilon_outer=0.005)
+
+    def release(self):
+        self.gripper.move(0.08, speed=SPEED)
 
 
 class PandaInterpolationController(mp.Process):
@@ -73,6 +85,7 @@ class PandaInterpolationController(mp.Process):
         self.soft_real_time = soft_real_time
         self.receive_latency = receive_latency
         self.verbose = verbose
+        self.panda = FrankaInterface(self.robot_ip)
 
         if get_max_k is None:
             get_max_k = int(frequency * 5)
@@ -199,8 +212,6 @@ class PandaInterpolationController(mp.Process):
             os.sched_setscheduler(
                 0, os.SCHED_RR, os.sched_param(20))
 
-        panda = FrankaInterface(self.robot_ip)
-
         try:
             if self.verbose:
                 print(
@@ -209,13 +220,13 @@ class PandaInterpolationController(mp.Process):
 
             # init pose
             if self.joints_init is not None:
-                panda.move_to_joint_positions(self.joints_init)
+                self.panda.move_to_joint_positions(self.joints_init)
                 print("Moving to initial joint positions")
 
             # main loop
             dt = 1. / self.frequency
 
-            curr_pose = panda.get_ee_pose()
+            curr_pose = self.panda.get_ee_pose()
             # use monotonic time to make sure the control loop never go backward
             curr_t = time.monotonic()
             last_waypoint_time = curr_t
@@ -237,10 +248,10 @@ class PandaInterpolationController(mp.Process):
                 filter_coeff=1.0)
 
             # start controller
-            panda.robot.start_controller(ctrl)
+            self.panda.robot.start_controller(ctrl)
 
             iter_idx = 0
-            with panda.robot.create_context(frequency=self.frequency) as ctx:
+            with self.panda.robot.create_context(frequency=self.frequency) as ctx:
                 while ctx.ok():
                     # start control iteration
 
@@ -260,7 +271,7 @@ class PandaInterpolationController(mp.Process):
 
                     for key, func_name in self.receive_keys:
                         # Call the function
-                        state[key] = getattr(panda, func_name)()
+                        state[key] = getattr(self.panda, func_name)()
 
                     t_recv = time.time()
                     state['robot_receive_timestamp'] = t_recv
@@ -327,8 +338,8 @@ class PandaInterpolationController(mp.Process):
 
         finally:
             print('\n\n\n\nterminate_current_policy\n\n\n\n\n')
-            panda.close()
-            del panda
+            self.panda.close()
+            del self.panda
             self.ready_event.set()
 
             if self.verbose:

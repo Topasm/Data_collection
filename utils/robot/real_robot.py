@@ -57,8 +57,8 @@ class RealEnv:
                  obs_key_map=DEFAULT_OBS_KEY_MAP,
                  obs_float32=False,
                  # action
-                 max_pos_speed=0.015,
-                 max_rot_speed=0.03,
+                 max_pos_speed=0.010,
+                 max_rot_speed=0.01,
                  # robot
                  tcp_offset=0.13,
                  init_joints=True,
@@ -175,7 +175,7 @@ class RealEnv:
         robot = PandaInterpolationController(
             shm_manager=shm_manager,
             robot_ip=robot_ip,
-            frequency=300,
+            frequency=100,
             joints_init=j_init,
             verbose=False
 
