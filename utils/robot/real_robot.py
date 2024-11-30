@@ -35,6 +35,7 @@ DEFAULT_OBS_KEY_MAP = {
     'ActualTCPSpeed': 'robot_eef_pose_vel',
     'ActualQ': 'robot_joint',
     'ActualQd': 'robot_joint_vel',
+    'Actualgripper': 'robot_gripper',
     # timestamps
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'

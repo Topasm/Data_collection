@@ -31,6 +31,7 @@ class FrankaInterface:
     def __init__(self, ip='172.16.0.2'):
         self.robot = panda_py.Panda(ip)
         self.gripper = panda_py.libfranka.Gripper(ip)
+        self.gripper_state = 0  # 0: open, 1: closed
 
         self.robot.recover()
         self.gripper.homing()
@@ -60,8 +61,14 @@ class FrankaInterface:
         self.gripper.grasp(0.01, speed=SPEED, force=FORCE,
                            epsilon_inner=0.005, epsilon_outer=0.005)
 
+        self.gripper_state = 1
+
     def release(self):
         self.gripper.move(0.08, speed=SPEED)
+        self.gripper_state = 0
+
+    def get_gripper_state(self):
+        return self.gripper_state
 
 
 class PandaInterpolationController(mp.Process):
@@ -107,15 +114,14 @@ class PandaInterpolationController(mp.Process):
             ('ActualTCPPose', 'get_ee_pose'),
             ('ActualQ', 'get_joint_positions'),
             ('ActualQd', 'get_joint_velocities'),
+            ('Actualgripper', 'get_gripper_state'),
+
         ]
 
         example = dict()
-        for key, func_name in receive_keys:
-            if 'joint' in func_name:
-                example[key] = np.zeros(7)
-            elif 'ee_pose' in func_name:
-                example[key] = np.zeros(6)  # Change to 6 for euler angles
-
+        pstate = self.get_state()
+        for key in receive_keys:
+            example[key[0]] = np.array(getattr(pstate, key[1]))
         example['robot_receive_timestamp'] = time.time()
         example['robot_timestamp'] = time.time()
         ring_buffer = SharedMemoryRingBuffer.create_from_examples(
@@ -204,6 +210,9 @@ class PandaInterpolationController(mp.Process):
 
     def get_all_state(self):
         return self.ring_buffer.get_all()
+
+    def get_gripper_state(self):
+        return self.panda.get_gripper_state()
 
     # ========= main loop in process ============
     def run(self):
