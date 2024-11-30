@@ -8,7 +8,6 @@ import panda_py
 from utils.inputs.spacemouse_shared_memory import Spacemouse
 import cv2
 from multiprocessing.managers import SharedMemoryManager
-from utils.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 from utils.robot.real_robot import RealEnv
 from utils.precise_sleep import precise_wait
 
