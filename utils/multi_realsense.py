@@ -6,7 +6,7 @@ from multiprocessing.managers import SharedMemoryManager
 import numpy as np
 import pyrealsense2 as rs
 from utils.single_realsense import SingleRealsense
-from utils.video_recorder import VideoRecorder
+from utils.camera.video_recorder import VideoRecorder
 
 
 class MultiRealsense:

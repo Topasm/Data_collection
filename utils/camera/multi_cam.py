@@ -6,6 +6,7 @@ from multiprocessing.managers import SharedMemoryManager
 import numpy as np
 import pyrealsense2 as rs
 from utils.camera.single_cam import SingleRealsense
+from utils.camera.video_recorder import VideoRecorder
 
 
 class MultiRealsense:
@@ -16,17 +17,22 @@ class MultiRealsense:
                  capture_fps=30,
                  put_fps=None,
                  put_downsample=True,
+                 record_fps=None,
                  enable_color=True,
                  enable_depth=False,
-                 process_depth=False,
                  enable_infrared=False,
                  get_max_k=30,
                  advanced_mode_config: Optional[Union[dict,
                                                       List[dict]]] = None,
                  transform: Optional[Union[Callable[[
                      Dict], Dict], List[Callable]]] = None,
-                 verbose=False,
-                 pose_buffer=None
+                 vis_transform: Optional[Union[Callable[[
+                     Dict], Dict], List[Callable]]] = None,
+                 recording_transform: Optional[Union[Callable[[
+                     Dict], Dict], List[Callable]]] = None,
+                 video_recorder: Optional[Union[VideoRecorder,
+                                                List[VideoRecorder]]] = None,
+                 verbose=False
                  ):
         if shm_manager is None:
             shm_manager = SharedMemoryManager()
@@ -39,6 +45,13 @@ class MultiRealsense:
             advanced_mode_config, n_cameras, dict)
         transform = repeat_to_list(
             transform, n_cameras, Callable)
+        vis_transform = repeat_to_list(
+            vis_transform, n_cameras, Callable)
+        recording_transform = repeat_to_list(
+            recording_transform, n_cameras, Callable)
+
+        video_recorder = repeat_to_list(
+            video_recorder, n_cameras, VideoRecorder)
 
         cameras = dict()
         for i, serial in enumerate(serial_numbers):
@@ -49,20 +62,21 @@ class MultiRealsense:
                 capture_fps=capture_fps,
                 put_fps=put_fps,
                 put_downsample=put_downsample,
+                record_fps=record_fps,
                 enable_color=enable_color,
                 enable_depth=enable_depth,
-                process_depth=process_depth,
                 enable_infrared=enable_infrared,
                 get_max_k=get_max_k,
                 advanced_mode_config=advanced_mode_config[i],
                 transform=transform[i],
+                vis_transform=vis_transform[i],
+                recording_transform=recording_transform[i],
+                video_recorder=video_recorder[i],
                 verbose=verbose
             )
 
         self.cameras = cameras
-        self.serial_numbers = serial_numbers
         self.shm_manager = shm_manager
-        self.pose_buffer = pose_buffer
 
     def __enter__(self):
         self.start()
@@ -107,7 +121,7 @@ class MultiRealsense:
         for camera in self.cameras.values():
             camera.join()
 
-    def get(self, k=None, index=None, out=None) -> Dict[int, Dict[str, np.ndarray]]:
+    def get(self, k=None, out=None) -> Dict[int, Dict[str, np.ndarray]]:
         """
         Return order T,H,W,C
         {
@@ -118,11 +132,6 @@ class MultiRealsense:
             1: ...
         }
         """
-        if index is not None:
-            this_out = None
-            this_out = self.cameras[self.serial_numbers[index]].get(
-                k=k, out=this_out)
-            return this_out
         if out is None:
             out = dict()
         for i, camera in enumerate(self.cameras.values()):
@@ -133,6 +142,25 @@ class MultiRealsense:
             out[i] = this_out
         return out
 
+    def get_vis(self, out=None):
+        results = list()
+        for i, camera in enumerate(self.cameras.values()):
+            this_out = None
+            if out is not None:
+                this_out = dict()
+                for key, v in out.items():
+                    # use the slicing trick to maintain the array
+                    # when v is 1D
+                    this_out[key] = v[i:i+1].reshape(v.shape[1:])
+            this_out = camera.get_vis(out=this_out)
+            if out is None:
+                results.append(this_out)
+        if out is None:
+            out = dict()
+            for key in results[0].keys():
+                out[key] = np.stack([x[key] for x in results])
+        return out
+
     def set_color_option(self, option, value):
         n_camera = len(self.cameras)
         value = repeat_to_list(value, n_camera, numbers.Number)
@@ -140,7 +168,8 @@ class MultiRealsense:
             camera.set_color_option(option, value[i])
 
     def set_exposure(self, exposure=None, gain=None):
-        """150nit. (0.1 ms, 1/10000s)
+        """
+        exposure: (1, 10000) 100us unit. (0.1 ms, 1/10000s)
         gain: (0, 128)
         """
 
@@ -168,94 +197,28 @@ class MultiRealsense:
     def get_depth_scale(self):
         return np.array([c.get_depth_scale() for c in self.cameras.values()])
 
+    def start_recording(self, video_path: Union[str, List[str]], start_time: float):
+        if isinstance(video_path, str):
+            # directory
+            video_dir = pathlib.Path(video_path)
+            assert video_dir.parent.is_dir()
+            video_dir.mkdir(parents=True, exist_ok=True)
+            video_path = list()
+            for i in range(self.n_cameras):
+                video_path.append(
+                    str(video_dir.joinpath(f'{i}.mp4').absolute()))
+        assert len(video_path) == self.n_cameras
+
+        for i, camera in enumerate(self.cameras.values()):
+            camera.start_recording(video_path[i], start_time)
+
+    def stop_recording(self):
+        for i, camera in enumerate(self.cameras.values()):
+            camera.stop_recording()
+
     def restart_put(self, start_time):
         for camera in self.cameras.values():
             camera.restart_put(start_time)
-
-    # def run(self):
-    #     threadpool_limits(16)
-    #     cv2.setNumThreads(16)
-    #     iter_idx = 0
-    #     while not self.stop_event.is_set():
-
-    #         out = dict()
-    #         # get camera data
-    #         for i, camera in enumerate(self.cameras.values()):
-    #             this_out = None
-    #             if i in out:
-    #                 this_out = out[i]
-
-    #             this_out = camera.get(out=this_out)
-
-    #             out[i] = this_out
-
-    #         # process camera data
-    #         tmp = dict()
-    #         for i, camera in enumerate(self.cameras.values()):
-    #             v = out[i]["vertices"]
-    #             tex_coords = out[i]["tex"]
-    #             color = out[i]["color"]
-
-    #             colors = get_color_from_tex_coords(tex_coords, color)
-    #             colors = np.ascontiguousarray(colors)
-
-    #             points, colors = filter_vectors(v, colors)
-
-    #             if camera.name == "wrist_cam":
-    #                 poses = self.pose_buffer.get_last_k(k=50)
-
-    #                 pose_times = np.abs(
-    #                     poses["timestamp"] - out[i]["timestamp"])
-    #                 pose_idx = np.argmin(pose_times)
-
-    #                 diff = poses["timestamp"][pose_idx] - out[i]["timestamp"]
-    #                 tcp_T_base = poses["pose"][pose_idx]
-
-    #                 wristcam_T_base = tcp_T_base @ camera.transform
-    #                 wristcam_T_base_T = np.ascontiguousarray(
-    #                     wristcam_T_base.T[:3, :3])
-    #                 points = points @ wristcam_T_base_T + \
-    #                     wristcam_T_base[:3, 3]
-
-    #             else:
-    #                 points = points @ camera.transform_T + \
-    #                     camera.transform[:3, 3]
-
-    #             tmp[camera.name] = np.concatenate(
-    #                 [points.reshape(-1, 3), colors.reshape(-1, 3) / 255.0], axis=-1
-    #             )
-
-    #         pcds = np.concatenate(
-    #             [x for x in tmp.values()], axis=0)  # merge pcds
-    #         mask = pcd_filter_bound(pcds[..., :3])
-    #         pcds = pcds[mask]
-
-    #         pcds = pcds[uniform_sampling(pcds, npoints=16384)]
-
-    #         # commented out for data collection. Uncomment for testing
-
-    #         fps_sampling_idx = fpsample.fps_sampling(pcds[..., :3], 5000)
-
-    #         pcds = pcds[fps_sampling_idx]
-
-    #         pcds = pcds[
-    #             dbscan_outlier_removal_idx(
-    #                 pcds[..., :3], eps=0.3, min_samples=300)
-    #         ]
-    #         pcds = pcds[
-    #             dbscan_outlier_removal_idx(
-    #                 pcds[..., :3], eps=0.02, min_samples=5)
-    #         ]
-    #         pcds = pcds[uniform_sampling(pcds, npoints=4096)]
-
-    #         pcds = {"pcds": pcds}
-
-    #         self.pcd_ring_buffer.put(pcds)
-
-    #         if iter_idx == 0:
-    #             self.pcd_process_ready_event.set()
-
-    #         iter_idx += 1
 
 
 def repeat_to_list(x, n: int, cls):

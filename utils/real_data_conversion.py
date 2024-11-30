@@ -10,7 +10,7 @@ import concurrent.futures
 from tqdm import tqdm
 from common.replay_buffer import ReplayBuffer, get_optimal_chunks
 from common.cv2_util import get_image_transform
-from utils.video_recorder import read_video
+from utils.camera.video_recorder import read_video
 from codecs.imagecodecs import (
     register_codecs,
     Jpeg2k

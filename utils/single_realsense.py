@@ -14,7 +14,7 @@ from utils.camera.timestamp_accumulator import get_accumulate_timestamp_idxs
 from utils.shared_memory.shared_ndarray import SharedNDArray
 from utils.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 from utils.shared_memory.shared_memory_queue import SharedMemoryQueue, Full, Empty
-from utils.video_recorder import VideoRecorder
+from utils.camera.video_recorder import VideoRecorder
 
 
 class Command(enum.Enum):
