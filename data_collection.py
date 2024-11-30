@@ -144,7 +144,7 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
                 # sprint("target_pose", target_pose)
 
                 # execute teleop command
-                env.exec_actions(
+                env.step(
                     actions=[target_pose],
                     timestamps=[t_command_target -
                                 time.monotonic() + time.time()],
