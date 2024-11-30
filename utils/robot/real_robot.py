@@ -28,182 +28,84 @@ from utils.cv2_util import (
 )
 from utils.multi_camera_visualizer import MultiCameraVisualizer
 from utils.camera.video_recorder import VideoRecorder
-
-DEFAULT_OBS_KEY_MAP = {
-    # robot
-    'ActualTCPPose': 'robot_eef_pose',
-    'ActualTCPSpeed': 'robot_eef_pose_vel',
-    'ActualQ': 'robot_joint',
-    'ActualQd': 'robot_joint_vel',
-    'Actualgripper': 'robot_gripper',
-    # timestamps
-    'step_idx': 'step_idx',
-    'timestamp': 'timestamp'
-}
+import torch
+import os
 
 
 class RealEnv:
     def __init__(self,
-                 # required params
-                 output_dir,
-                 robot_ip,
-                 # env params
-                 frequency=10,
-                 n_obs_steps=2,
-                 # obs
-                 obs_image_resolution=(640, 480),
-                 max_obs_buffer_size=30,
-                 camera_serial_numbers=None,
-                 obs_key_map=DEFAULT_OBS_KEY_MAP,
-                 obs_float32=False,
-                 # action
-                 max_pos_speed=0.010,
-                 max_rot_speed=0.01,
-                 # robot
-                 tcp_offset=0.13,
-                 init_joints=True,
-                 # video capture params
-                 video_capture_fps=30,
-                 video_capture_resolution=(1280, 720),
-                 # saving params
-                 record_raw_video=True,
-                 thread_per_video=2,
-                 video_crf=21,
-                 # vis params
-                 enable_multi_cam_vis=True,
-                 multi_cam_vis_resolution=(1280, 720),
-                 # shared memory
-                 shm_manager=None
+                 task_config=None,
+                 WH=[640, 480],
+                 capture_fps=15,
+                 obs_fps=15,
+                 n_obs_steps=1,
+                 enable_color=True,
+                 enable_depth=True,
+                 process_depth=False,
+                 use_robot=True,
+                 verbose=False,
+                 gripper_enable=False,
+                 speed=50,
+                 wrist=None,
                  ):
-        assert frequency <= video_capture_fps
-        output_dir = pathlib.Path(output_dir)
-        assert output_dir.parent.is_dir()
-        video_dir = output_dir.joinpath('videos')
-        video_dir.mkdir(parents=True, exist_ok=True)
-        zarr_path = str(output_dir.joinpath('replay_buffer.zarr').absolute())
-        replay_buffer = ReplayBuffer.create_from_path(
-            zarr_path=zarr_path, mode='a')
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu")
+        self.WH = WH
+        self.capture_fps = capture_fps
+        self.obs_fps = obs_fps
+        self.n_obs_steps = n_obs_steps
+        if wrist is None:
+            print('No wrist camera. Using default camera id.')
+            self.WRIST = '311322300308'
+        else:
+            self.WRIST = wrist
 
-        if shm_manager is None:
-            shm_manager = SharedMemoryManager()
-            shm_manager.start()
-        if camera_serial_numbers is None:
-            camera_serial_numbers = SingleRealsense.get_connected_devices_serial()
+        base_path = os.path.dirname(
+            os.path.dirname(os.path.realpath(__file__)))
+        self.vis_dir = os.path.join(base_path, 'dump/vis_real_world')
 
-        color_tf = get_image_transform(
-            input_res=video_capture_resolution,
-            output_res=obs_image_resolution,
-            # obs output rgb
-            bgr_to_rgb=True)
-        color_transform = color_tf
-        if obs_float32:
-            def color_transform(x): return color_tf(x).astype(np.float32) / 255
+        self.serial_numbers = SingleRealsense.get_connected_devices_serial()
+        if self.WRIST is not None and self.WRIST in self.serial_numbers:
+            print('Found wrist camera.')
+            self.serial_numbers.remove(self.WRIST)
+            self.serial_numbers = self.serial_numbers + \
+                [self.WRIST]  # put the wrist camera at the end
+            self.n_fixed_cameras = len(self.serial_numbers) - 1
+        else:
+            self.n_fixed_cameras = len(self.serial_numbers)
+        print(f'Found {self.n_fixed_cameras} fixed cameras.')
 
-        def transform(data):
-            data['color'] = color_transform(data['color'])
-            return data
+        self.shm_manager = SharedMemoryManager()
+        self.shm_manager.start()
 
-        rw, rh, col, row = optimal_row_cols(
-            n_cameras=len(camera_serial_numbers),
-            in_wh_ratio=obs_image_resolution[0]/obs_image_resolution[1],
-            max_resolution=multi_cam_vis_resolution
-        )
-        vis_color_transform = get_image_transform(
-            input_res=video_capture_resolution,
-            output_res=(rw, rh),
-            bgr_to_rgb=False
-        )
+        self.realsense = MultiRealsense(
+            serial_numbers=self.serial_numbers,
+            shm_manager=self.shm_manager,
+            resolution=(self.WH[0], self.WH[1]),
+            capture_fps=self.capture_fps,
+            enable_color=enable_color,
+            enable_depth=enable_depth,
+            process_depth=process_depth,
+            verbose=verbose)
+        self.realsense.set_exposure(exposure=100, gain=60)
+        self.realsense.set_white_balance()
+        self.last_realsense_data = None
+        self.enable_color = enable_color
+        self.enable_depth = enable_depth
+        self.use_robot = use_robot
 
-        def vis_transform(data):
-            data['color'] = vis_color_transform(data['color'])
-            return data
-
-        recording_transfrom = None
-        recording_fps = video_capture_fps
-        recording_pix_fmt = 'bgr24'
-        if not record_raw_video:
-            recording_transfrom = transform
-            recording_fps = frequency
-            recording_pix_fmt = 'rgb24'
-
-        video_recorder = VideoRecorder.create_h264(
-            fps=recording_fps,
-            codec='h264',
-            input_pix_fmt=recording_pix_fmt,
-            crf=video_crf,
-            thread_type='FRAME',
-            thread_count=thread_per_video)
-
-        realsense = MultiRealsense(
-            serial_numbers=camera_serial_numbers,
-            shm_manager=shm_manager,
-            resolution=video_capture_resolution,
-            capture_fps=video_capture_fps,
-            put_fps=video_capture_fps,
-            # send every frame immediately after arrival
-            # ignores put_fps
-            put_downsample=False,
-            record_fps=recording_fps,
-            enable_color=True,
-            enable_depth=False,
-            enable_infrared=False,
-            get_max_k=max_obs_buffer_size,
-            transform=transform,
-            vis_transform=vis_transform,
-            recording_transform=recording_transfrom,
-            video_recorder=video_recorder,
-            verbose=False
-        )
-
-        multi_cam_vis = None
-        if enable_multi_cam_vis:
-            multi_cam_vis = MultiCameraVisualizer(
-                realsense=realsense,
-                row=row,
-                col=col,
-                rgb_to_bgr=False
+        if self.use_robot:
+            self.robot = PandaInterpolationController(
+                shm_manager=self.shm_manager,
+                robot_ip='172.16.0.2',
+                frequency=100,
+                verbose=False,
+                speed=speed,
+                gripper_enable=gripper_enable
             )
 
-        cube_diag = np.linalg.norm([1, 1, 1])
-
-        if not init_joints:
-            j_init = None
-
-        j_init = np.array([-0.034105571012241494, -0.31607742496115504, 0.7158540161618182, -
-                          2.489522290313453, 0.25612878997935834, 2.284947552903217, 1.213271564807597])
-
-        robot = PandaInterpolationController(
-            shm_manager=shm_manager,
-            robot_ip=robot_ip,
-            frequency=100,
-            joints_init=j_init,
-            verbose=False
-
-        )
-        self.realsense = realsense
-        self.robot = robot
-        self.multi_cam_vis = multi_cam_vis
-        self.video_capture_fps = video_capture_fps
-        self.frequency = frequency
-        self.n_obs_steps = n_obs_steps
-        self.max_obs_buffer_size = max_obs_buffer_size
-        self.max_pos_speed = max_pos_speed
-        self.max_rot_speed = max_rot_speed
-        self.obs_key_map = obs_key_map
-        # recording
-        self.output_dir = output_dir
-        self.video_dir = video_dir
-        self.replay_buffer = replay_buffer
-        # temp memory buffers
-        self.last_realsense_data = None
-        # recording buffers
-        self.obs_accumulator = None
-        self.action_accumulator = None
-        self.stage_accumulator = None
-
-        self.start_time = None
-
     # ======== start-stop API =============
+
     @property
     def is_ready(self):
         return self.realsense.is_ready and self.robot.is_ready
@@ -211,15 +113,11 @@ class RealEnv:
     def start(self, wait=True):
         self.realsense.start(wait=False)
         self.robot.start(wait=False)
-        if self.multi_cam_vis is not None:
-            self.multi_cam_vis.start(wait=False)
         if wait:
             self.start_wait()
 
     def stop(self, wait=False):
         self.end_episode()
-        if self.multi_cam_vis is not None:
-            self.multi_cam_vis.stop(wait=False)
         self.robot.stop(wait=False)
         self.realsense.stop(wait=False)
         if wait:
@@ -228,16 +126,13 @@ class RealEnv:
     def start_wait(self):
         self.realsense.start_wait()
         self.robot.start_wait()
-        if self.multi_cam_vis is not None:
-            self.multi_cam_vis.start_wait()
 
     def stop_wait(self):
         self.robot.stop_wait()
         self.realsense.stop_wait()
-        if self.multi_cam_vis is not None:
-            self.multi_cam_vis.stop_wait()
 
     # ========= context manager ===========
+
     def __enter__(self):
         self.start()
         return self
@@ -251,27 +146,45 @@ class RealEnv:
         assert self.is_ready
 
         # get data
-        # 30 Hz, camera_receive_timestamp
-        k = math.ceil(self.n_obs_steps *
-                      (self.video_capture_fps / self.frequency))
+        k = math.ceil(self.n_obs_steps * (self.capture_fps / self.obs_fps))
         self.last_realsense_data = self.realsense.get(
             k=k,
-            out=self.last_realsense_data)
+            out=self.last_realsense_data
+        )
+        robot_obs = dict()
+        if self.use_robot:
+            robot_obs['joint_position'] = self.robot.get_state()
+            robot_obs['EE_pose'] = self.robot.get_EE_pose()
+            robot_obs['gripper_state'] = self.robot.get_gripper_state()
 
-        # 125 hz, robot_receive_timestamp
-        last_robot_data = self.robot.get_all_state()
-        # both have more than n_obs_steps data
+            # 125 hz, robot_receive_timestamp
+            last_robot_data = self.robot.get_all_state()
+            # both have more than n_obs_steps data
 
-        # align camera obs timestamps
-        dt = 1 / self.frequency
-        last_timestamp = np.max([x['timestamp'][-1]
-                                for x in self.last_realsense_data.values()])
-        obs_align_timestamps = last_timestamp - \
-            (np.arange(self.n_obs_steps)[::-1] * dt)
+            # align camera obs timestamps
+            dt = 1 / self.frequency
+            last_timestamp = np.max([x['timestamp'][-1]
+                                    for x in self.last_realsense_data.values()])
+            obs_align_timestamps = last_timestamp - \
+                (np.arange(self.n_obs_steps)[::-1] * dt)
 
-        camera_obs = dict()
-        for camera_idx, value in self.last_realsense_data.items():
-            this_timestamps = value['timestamp']
+            camera_obs = dict()
+            for camera_idx, value in self.last_realsense_data.items():
+                this_timestamps = value['timestamp']
+                this_idxs = list()
+                for t in obs_align_timestamps:
+                    is_before_idxs = np.nonzero(this_timestamps < t)[0]
+                    this_idx = 0
+                    if len(is_before_idxs) > 0:
+                        this_idx = is_before_idxs[-1]
+                    this_idxs.append(this_idx)
+                # remap key
+                camera_obs[f'camera_{camera_idx}'] = value['color'][this_idxs]
+                # camera_obs['image'] = value['color'][this_idxs]
+
+            # align robot obs
+            robot_timestamps = last_robot_data['robot_receive_timestamp']
+            this_timestamps = robot_timestamps
             this_idxs = list()
             for t in obs_align_timestamps:
                 is_before_idxs = np.nonzero(this_timestamps < t)[0]
@@ -279,82 +192,101 @@ class RealEnv:
                 if len(is_before_idxs) > 0:
                     this_idx = is_before_idxs[-1]
                 this_idxs.append(this_idx)
-            # remap key
-            camera_obs[f'camera_{camera_idx}'] = value['color'][this_idxs]
-            # camera_obs['image'] = value['color'][this_idxs]
 
-        # align robot obs
-        robot_timestamps = last_robot_data['robot_receive_timestamp']
-        this_timestamps = robot_timestamps
-        this_idxs = list()
-        for t in obs_align_timestamps:
-            is_before_idxs = np.nonzero(this_timestamps < t)[0]
-            this_idx = 0
-            if len(is_before_idxs) > 0:
-                this_idx = is_before_idxs[-1]
-            this_idxs.append(this_idx)
+            robot_obs_raw = dict()
+            for k, v in last_robot_data.items():
+                if k in self.obs_key_map:
+                    robot_obs_raw[self.obs_key_map[k]] = v
 
-        robot_obs_raw = dict()
-        for k, v in last_robot_data.items():
-            if k in self.obs_key_map:
-                robot_obs_raw[self.obs_key_map[k]] = v
+            robot_obs = dict()
+            for k, v in robot_obs_raw.items():
+                robot_obs[k] = v[this_idxs]
 
-        robot_obs = dict()
-        for k, v in robot_obs_raw.items():
-            robot_obs[k] = v[this_idxs]
+            # accumulate obs
+            if self.obs_accumulator is not None:
+                self.obs_accumulator.put(
+                    robot_obs_raw,
+                    robot_timestamps
+                )
 
-        # accumulate obs
-        if self.obs_accumulator is not None:
-            self.obs_accumulator.put(
-                robot_obs_raw,
-                robot_timestamps
+            # return obs
+            obs_data = dict(camera_obs)
+            obs_data.update(robot_obs)
+            obs_data['timestamp'] = obs_align_timestamps
+            return obs_data
+
+    def get_robot_state(self):
+        """
+        Get the real robot state.
+        """
+        gripper_state = self.gripper.read_once()
+        gripper_qpos = gripper_state.width
+
+        robot_qpos = np.concatenate(
+            [self.panda.get_log()["q"][-1], [gripper_qpos / 2.0]]
+        )
+
+        obs = np.concatenate(
+            [self.panda.get_position(), self.panda.get_orientation(), robot_qpos],
+            dtype=np.float32,  # 15
+        )
+
+        assert obs.shape == (15,), f"incorrect obs shape, {obs.shape}"
+
+        return obs
+
+    def log_pose(self, verbose=False):
+        while True:
+            start_time = time.time()
+
+            pose = np.ascontiguousarray(
+                self.panda.get_pose()).astype(np.float32)
+            init_time = time.time()
+
+            data = {
+                "pose": pose,
+                "timestamp": init_time,
+            }
+
+            self.pose_buffer.put(data)
+
+            elapsed_time = time.time() - start_time
+            if elapsed_time < 0.001:
+                time.sleep(0.001 - elapsed_time)
+
+    def step(self, action, visualize=False):
+        """
+        Step robot in the real.
+        """
+        # Simple motion in cartesian space
+        gripper = action[-1] * 0.08
+        euler = action[3:-1]  # Euler angle
+        quat = transforms3d.euler.euler2quat(*euler)
+
+        pose = np.concatenate([action[:3], quat], axis=0)
+        print(pose)
+
+        try:
+            results = self.planner.plan_screw(
+                pose, self.agent.get_qpos(), time_step=0.1
             )
+            waypoints = results["position"][..., np.newaxis]
 
-        # return obs
-        obs_data = dict(camera_obs)
-        obs_data.update(robot_obs)
-        obs_data['timestamp'] = obs_align_timestamps
-        return obs_data
+            self.panda.move_to_joint_position(
+                waypoints=waypoints, speed_factor=0.1)
+            self.gripper.move(width=gripper, speed=0.3)
 
-    def exec_actions(self,
-                     actions: np.ndarray,
-                     timestamps: np.ndarray,
-                     stages: Optional[np.ndarray] = None):
-        assert self.is_ready
-        if not isinstance(actions, np.ndarray):
-            actions = np.array(actions)
-        if not isinstance(timestamps, np.ndarray):
-            timestamps = np.array(timestamps)
-        if stages is None:
-            stages = np.zeros_like(timestamps, dtype=np.int64)
-        elif not isinstance(stages, np.ndarray):
-            stages = np.array(stages, dtype=np.int64)
+            q_pose = np.zeros((9,))
+            q_pose[:-2] = self.panda.q
+            q_pose[-2] = gripper / 2.0
+            q_pose[-1] = gripper / 2.0
 
-        # convert action to pose
-        receive_time = time.time()
-        is_new = timestamps > receive_time
-        new_actions = actions[is_new]
-        new_timestamps = timestamps[is_new]
-        new_stages = stages[is_new]
+            self.agent.set_qpos(q_pose)
+        except Exception as e:
+            print(e)
+            print("Failed to generate valid waypoints.")
 
-        # schedule waypoints
-        for i in range(len(new_actions)):
-            self.robot.schedule_waypoint(
-                pose=new_actions[i],
-                target_time=new_timestamps[i]
-            )
-
-        # record actions
-        if self.action_accumulator is not None:
-            self.action_accumulator.put(
-                new_actions,
-                new_timestamps
-            )
-        if self.stage_accumulator is not None:
-            self.stage_accumulator.put(
-                new_stages,
-                new_timestamps
-            )
+        return self.get_obs(visualize=visualize)
 
     def get_robot_state(self):
         return self.robot.get_state()
