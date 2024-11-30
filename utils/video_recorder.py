@@ -1,7 +1,7 @@
 from typing import Optional, Callable, Generator
 import numpy as np
 import av
-from common.timestamp_accumulator import get_accumulate_timestamp_idxs
+from utils.camera.timestamp_accumulator import get_accumulate_timestamp_idxs
 
 
 def read_video(

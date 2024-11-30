@@ -5,161 +5,127 @@ import queue
 import panda_py.controllers
 from scipy.spatial.transform import Rotation as R
 import panda_py
-from utils.spacemouse import Spacemouse
+from utils.inputs.spacemouse_shared_memory import Spacemouse
 import cv2
+from multiprocessing.managers import SharedMemoryManager
+from utils.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
+from utils.robot.real_robot import RealRobot
+from utils.precise_sleep import precise_wait
 
-# Constants
-MOVE_INCREMENT = 0.0002
-SPEED = 0.05  # [m/s]
-FORCE = 20.0  # [N]
+from utils.inputs.keystroke_counter import (
+    KeystrokeCounter, Key, KeyCode
+)
 
-# Initialize robot and gripper
-hostname = '172.16.0.2'
-robot = panda_py.Panda(hostname)
-gripper = panda_py.libfranka.Gripper(hostname)
-robot.recover()
-robot.move_to_start()
-gripper.homing()
-
-# Global variables
-running = True
-recording = False
-current_translation = robot.get_position()
-current_rotation = robot.get_orientation()
-
-# Create a thread-safe queue for data sharing
-data_queue = queue.Queue(maxsize=1000)
+import click
 
 
-def data_recording():
-    global running, recording
-    # Initialize video capture
-    video_capture = cv2.VideoCapture(4)  # Adjust camera index if needed
+@click.command()
+@click.option('--output', '-o', default="./data", required=True, help="Directory to save demonstration dataset.")
+@click.option('--robot_ip', '-ri', default="172.16.0.2", required=True, help="Franka's IP address e.g. 172.16.0.2")
+@click.option('--init_joints', '-j', is_flag=True, default=False, help="Whether to initialize robot joint configuration in the beginning.")
+@click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
+@click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SpaceMouse command to executing on Robot in Sec.")
+def main(output, robot_ip, frequency, command_latency, init_joints):
+    dt = 1 / frequency
 
-    # Set camera properties to limit FPS and resolution
-    video_capture.set(cv2.CAP_PROP_FPS, 30)
-    video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    with SharedMemoryManager() as shm_manager:
+        with KeystrokeCounter() as key_counter, \
+                Spacemouse(shm_manager=shm_manager) as sm, \
+                RealRobot(robot_ip=robot_ip, output_dir=output, shm_manager=shm_manager
+                          ) as env:
 
-    # Small delay to ensure camera is initialized
-    time.sleep(0.5)
-    video_writer = None
+            cv2.setNumThreads(1)
 
-    # Desired frame interval in seconds
-    frame_interval = 1 / 30  # For 30 FPS
-    last_frame_time = time.time()
+            # Initialization is handled within RealRobot's __init__
+            time.sleep(1)
 
-    while running:
-        current_time = time.time()
-        elapsed = current_time - last_frame_time
-        if elapsed >= frame_interval:
-            last_frame_time = current_time
-            ret, frame = video_capture.read()
-            if ret:
-                # Display the frame
-                cv2.imshow('Recording', frame)
-                # Check for keyboard input
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('c'):
-                    if not recording:
-                        recording = True
-                        video_writer = cv2.VideoWriter(
-                            'video_output.avi',
-                            cv2.VideoWriter_fourcc(*'XVID'),
-                            30,
-                            (frame.shape[1], frame.shape[0])
-                        )
-                        print("Recording started.")
-                elif key == ord('s'):
-                    if recording:
-                        recording = False
-                        if video_writer is not None:
-                            video_writer.release()
-                        print("Recording stopped.")
-                elif key == ord('q'):
-                    running = False
-                    print("Exiting program.")
+            stop = False
+            iter_idx = 0
+            t_start = time.monotonic()
+            is_recording = False  # Initialize recording flag
 
-                if recording:
-                    # Write video frame
-                    video_writer.write(frame)
-                    # Retrieve data from queue and save
-                    while not data_queue.empty():
-                        try:
-                            timestamp, robot_q, ee_pose = data_queue.get(
-                                timeout=0.01)
-                            # Save data as needed
-                        except queue.Empty:
-                            pass
-            else:
-                print("Failed to read frame from camera.")
-        else:
-            # Sleep for the remaining time to match the desired frame rate
-            time.sleep(frame_interval - elapsed)
-    # Clean up
-    if recording and video_writer is not None:
-        video_writer.release()
-    video_capture.release()
-    cv2.destroyAllWindows()
+            # Initialize target_pose with current robot TCP pose
+            target_tcp_pose = env.get_tcp_pose()  # Returns position + quaternion
+            # Convert quaternion to rotation vector (axis-angle)
+            rotvec = R.from_quat(target_tcp_pose[3:]).as_rotvec()
+            target_pose = np.concatenate([target_tcp_pose[:3], rotvec])
 
+            while not stop:
+                t_cycle_end = t_start + (iter_idx + 1) * dt
+                t_sample = t_cycle_end - command_latency
+                t_command_target = t_cycle_end + dt
 
-def main():
-    global running, recording, current_translation, current_rotation
-    # Start data recording thread
-    data_thread = threading.Thread(target=data_recording)
-    data_thread.start()
-    # Delay to ensure data recording thread initializes
-    time.sleep(1.0)
+                # Get observations
+                obs = env.get_obs()
 
-    with Spacemouse(deadzone=0.3) as sm, robot.create_context(frequency=1000) as ctx:
-        controller = panda_py.controllers.CartesianImpedance()
-        robot.start_controller(controller)
-        time.sleep(1)
+                # Handle key presses
+                press_events = key_counter.get_press_events()
+                for key_stroke in press_events:
+                    if key_stroke == KeyCode(char='q'):
+                        # Exit program
+                        stop = True
+                    elif key_stroke == KeyCode(char='c'):
+                        # Start recording
+                        print('Start recording!')
+                        env.start_episode(
+                            start_time=t_start + (iter_idx + 2) * dt - time.monotonic() + time.time())
+                        key_counter.clear()
+                        is_recording = True
+                        print('Recording!')
+                    elif key_stroke == KeyCode(char='s'):
+                        # Stop recording
+                        env.end_episode()
+                        key_counter.clear()
+                        is_recording = False
+                        print('Stopped.')
+                    elif key_stroke == Key.backspace:
+                        # Delete the most recent recorded episode
+                        if click.confirm('Are you sure to drop the last episode?'):
+                            env.drop_episode()
+                            key_counter.clear()
+                            is_recording = False
+                stage = key_counter[Key.space]
 
-        while ctx.ok() and running:
-            # Start time for loop timing
-            start_time = time.perf_counter()
+                precise_wait(t_sample)
 
-            # Get Spacemouse input
-            sm_state = sm.get_motion_state_transformed()
-            dpos = sm_state[:3] * MOVE_INCREMENT
-            drot_xyz = sm_state[3:] * MOVE_INCREMENT * 3
+                # Get teleoperation command from the SpaceMouse
+                sm_state = sm.get_motion_state_transformed()
+                dpos = sm_state[:3] * env.max_pos_speed
+                drot_xyz = sm_state[3:] * env.max_rot_speed
 
-            # Update current pose
-            current_translation += dpos
-            delta_rotation = R.from_euler('xyz', drot_xyz)
-            current_rotation = (
-                delta_rotation * R.from_quat(current_rotation)
-            ).as_quat()
+                # Determine movement mode based on button presses
+                if not sm.is_button_pressed(0):
+                    # Translation mode
+                    drot_xyz[:] = 0
+                else:
+                    dpos[:] = 0
+                if not sm.is_button_pressed(1):
+                    # 2D translation mode
+                    dpos[2] = 0
 
-            # Handle gripper state changes
-            if sm.is_button_pressed(0):
-                gripper.grasp(0.01, speed=SPEED, force=FORCE,
-                              epsilon_inner=0.005, epsilon_outer=0.005)
-            elif sm.is_button_pressed(1):
-                gripper.move(0.08, speed=SPEED)
+                # Compute rotation increment
+                drot_vec = drot_xyz  # Assuming small angle approximation
 
-            # Collect data and send to recording thread
-            if recording:
-                timestamp = time.time()
-                robot_q = robot.q.copy()
-                ee_pose = robot.get_pose()
-                try:
-                    data_queue.put_nowait((timestamp, robot_q, ee_pose))
-                except queue.Full:
-                    print("Data queue is full. Data is being dropped.")
+                # Update target_pose
+                target_pose[:3] += dpos
+                drot = R.from_rotvec(drot_vec)
+                current_rot = R.from_rotvec(target_pose[3:])
+                new_rot = drot * current_rot
+                target_pose[3:] = new_rot.as_rotvec()
 
-            # Set robot control
-            controller.set_control(current_translation, current_rotation)
+                # Prepare action (position, rotation vector, gripper action)
+                gripper_action = 0.0  # Adjust gripper action if needed
+                action = np.concatenate([target_pose, [gripper_action]])
 
-            # Loop timing to maintain control frequency
-            end_time = time.perf_counter()
-            elapsed = end_time - start_time
-            sleep_time = max(0, (1 / 1000) - elapsed)
-            time.sleep(sleep_time)
-
-    data_thread.join()
+                # Execute action
+                env.exec_actions(
+                    actions=[action],
+                    timestamps=[t_command_target -
+                                time.monotonic() + time.time()],
+                    stages=[stage])
+                precise_wait(t_cycle_end)
+                iter_idx += 1
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,0 +1,14 @@
+{
+    "chunks": [
+        1
+    ],
+    "compressor": null,
+    "dtype": "<U100",
+    "fill_value": "",
+    "filters": null,
+    "order": "C",
+    "shape": [
+        0
+    ],
+    "zarr_format": 2
+}
