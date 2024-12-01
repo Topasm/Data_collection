@@ -11,7 +11,7 @@ from multiprocessing import Process, Queue, Event
 from multiprocessing.managers import SharedMemoryManager
 from utils.camera.multi_cam import MultiRealsense, SingleRealsense
 import numpy as np
-from utils.robot.panda_interpolation_controller import PandaInterpolationController
+from utils.robot.panda_controller import PandaController
 from typing import Optional
 import math
 import pathlib
@@ -34,6 +34,8 @@ import os
 
 class RealEnv:
     def __init__(self,
+                 output_dir='./data',
+                 robot_ip=None,
                  task_config=None,
                  WH=[640, 480],
                  capture_fps=15,
@@ -47,6 +49,7 @@ class RealEnv:
                  gripper_enable=False,
                  speed=50,
                  wrist=None,
+                 init_joints=False,
                  ):
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
@@ -95,12 +98,11 @@ class RealEnv:
         self.use_robot = use_robot
 
         if self.use_robot:
-            self.robot = PandaInterpolationController(
+            self.robot = PandaController(
                 shm_manager=self.shm_manager,
                 robot_ip='172.16.0.2',
                 frequency=100,
                 verbose=False,
-                speed=speed,
                 gripper_enable=gripper_enable
             )
 

@@ -71,7 +71,7 @@ class FrankaInterface:
         return self.gripper_state
 
 
-class PandaInterpolationController(mp.Process):
+class PandaController(mp.Process):
     def __init__(self,
                  shm_manager: SharedMemoryManager,
                  robot_ip,
