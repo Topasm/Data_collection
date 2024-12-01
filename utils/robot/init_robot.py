@@ -25,19 +25,15 @@ logging.basicConfig(level=logging.INFO)
 panda = panda_py.Panda(hostname)
 gripper = libfranka.Gripper(hostname)
 
-panda.move_to_start()
+# panda.move_to_start()
+
+pose = panda.q
+print(f"Current joint position: {pose}")
 
 
-joint_pose = [
-    7.4547783e-02,
-    -1.9822954e-01,
-    1.0989897e-02,
-    -2.6377580e00,
-    4.5893144e-02,
-    2.6391320e00,
-    6.3584524e-01,
-]
+joint_pose = [-0.01588696, -0.25534376, 0.18628714, -
+              2.28398158, 0.0769999, 2.02505396, 0.07858208]
 
 panda.move_to_joint_position(joint_pose, speed_factor=0.1)
 
-gripper.move(0.0, 0.1)
+# gripper.move(0.0, 0.1)

@@ -139,6 +139,7 @@ class RealEnv(mp.Process):
                 sm_state = self.space_mouse.get_motion_state_transformed()
                 dpos = sm_state[:3] * MOVE_INCREMENT
                 drot_xyz = sm_state[3:] * MOVE_INCREMENT * 3
+                drot_xyz[:] = 0
 
                 current_translation += np.array([dpos[0], dpos[1], dpos[2]])
                 if drot_xyz is not None:
@@ -175,18 +176,11 @@ class RealEnv(mp.Process):
             running = False
 
     def init_robot(self):
-        joint_pose = [
-            0.00000000e00,
-            -3.19999993e-01,
-            0.00000000e00,
-            -2.61799383e00,
-            0.00000000e00,
-            2.23000002e00,
-            7.85398185e-01,
-        ]
+        joint_pose = [-0.01588696, -0.25534376, 0.18628714, -
+                      2.28398158, 0.0769999, 2.02505396, 0.07858208]
 
         self.panda.move_to_joint_position(joint_pose)
-        self.gripper.move(width=0.0, speed=0.1)
+        self.gripper.move(width=0.8, speed=0.1)
 
         # replicate in sim
         action = np.zeros((9,))
