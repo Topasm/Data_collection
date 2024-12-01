@@ -177,6 +177,7 @@ class SingleRealsense(mp.Process):
             return self.ring_buffer.get_last_k(k, out=out)
 
     # ========= user API ===========
+
     def set_color_option(self, option: rs.option, value: float):
         self.command_queue.put({
             'cmd': Command.SET_COLOR_OPTION.value,

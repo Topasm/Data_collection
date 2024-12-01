@@ -3,6 +3,7 @@ from panda_py import libfranka
 
 import time
 import threading
+import panda_py.controllers
 import transforms3d
 import roboticstoolbox as rtb
 from scipy.spatial.transform import Rotation as R
@@ -11,7 +12,7 @@ from multiprocessing import Process, Queue, Event
 from multiprocessing.managers import SharedMemoryManager
 from utils.camera.multi_cam import MultiRealsense, SingleRealsense
 import numpy as np
-from utils.robot.panda_controller import PandaController
+
 from typing import Optional
 import math
 import pathlib
@@ -30,9 +31,21 @@ from utils.multi_camera_visualizer import MultiCameraVisualizer
 from utils.camera.video_recorder import VideoRecorder
 import torch
 import os
+from utils.inputs.spacemouse_shared_memory import Spacemouse
+import multiprocessing as mp
+import pickle
+
+cameras = {
+    "wrist_cam": "",
+    "right_cam": "",
+    "left_cam": "",
+}
+SPEED = 0.05  # [m/s]
+FORCE = 20.0  # [N]
+MOVE_INCREMENT = 0.0002
 
 
-class RealEnv:
+class RealEnv(mp.Process):
     def __init__(self,
                  output_dir='./data',
                  robot_ip=None,
@@ -46,40 +59,31 @@ class RealEnv:
                  process_depth=False,
                  use_robot=True,
                  verbose=False,
-                 gripper_enable=False,
+                 gripper_enable=True,
                  speed=50,
                  wrist=None,
                  init_joints=False,
                  ):
+        super().__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
         self.WH = WH
         self.capture_fps = capture_fps
         self.obs_fps = obs_fps
         self.n_obs_steps = n_obs_steps
-        if wrist is None:
-            print('No wrist camera. Using default camera id.')
-            self.WRIST = '311322300308'
-        else:
-            self.WRIST = wrist
-
-        base_path = os.path.dirname(
-            os.path.dirname(os.path.realpath(__file__)))
-        self.vis_dir = os.path.join(base_path, 'dump/vis_real_world')
+        self.panda = panda_py.Panda(robot_ip)
+        self.gripper = libfranka.Gripper(robot_ip)
+        self.panda.enable_logging(int(10))
 
         self.serial_numbers = SingleRealsense.get_connected_devices_serial()
-        if self.WRIST is not None and self.WRIST in self.serial_numbers:
-            print('Found wrist camera.')
-            self.serial_numbers.remove(self.WRIST)
-            self.serial_numbers = self.serial_numbers + \
-                [self.WRIST]  # put the wrist camera at the end
-            self.n_fixed_cameras = len(self.serial_numbers) - 1
-        else:
-            self.n_fixed_cameras = len(self.serial_numbers)
-        print(f'Found {self.n_fixed_cameras} fixed cameras.')
 
         self.shm_manager = SharedMemoryManager()
         self.shm_manager.start()
+
+        self.space_mouse = Spacemouse(
+            shm_manager=self.shm_manager, deadzone=0.3)
+        self.space_mouse.start()
+        self.ready_event = mp.Event()
 
         self.realsense = MultiRealsense(
             serial_numbers=self.serial_numbers,
@@ -97,44 +101,128 @@ class RealEnv:
         self.enable_depth = enable_depth
         self.use_robot = use_robot
 
-        if self.use_robot:
-            self.robot = PandaController(
-                shm_manager=self.shm_manager,
-                robot_ip='172.16.0.2',
-                frequency=100,
-                verbose=False,
-                gripper_enable=gripper_enable
-            )
+        multi_cam_vis = MultiCameraVisualizer(
+            realsense=self.realsense,
+            row=self.WH[0],
+            col=self.WH[1],
+            rgb_to_bgr=False
+        )
+        self.multi_cam_vis = multi_cam_vis
+
+        self.output_dir = output_dir
+        self.init_joints = init_joints
+        self.current_episode = []
+        self.episode_counter = 0  # To generate unique filenames
+        self.is_recording = False
+        os.makedirs(self.output_dir, exist_ok=True)
 
     # ======== start-stop API =============
 
+    def run(self):
+
+        try:
+            self.init_robot()
+            running = True
+            self.ready_event.set()
+            current_rotation = self.panda.get_orientation()
+            current_translation = self.panda.get_position()
+            sm_state = self.space_mouse.get_motion_state_transformed()
+
+            ctx = self.panda.create_context(frequency=300)
+            controller = panda_py.controllers.CartesianImpedance()
+            self.panda.start_controller(controller)
+            time.sleep(1)
+
+            while ctx.ok() and running:
+                start_time = time.perf_counter()
+
+                sm_state = self.space_mouse.get_motion_state_transformed()
+                dpos = sm_state[:3] * MOVE_INCREMENT
+                drot_xyz = sm_state[3:] * MOVE_INCREMENT * 3
+
+                current_translation += np.array([dpos[0], dpos[1], dpos[2]])
+                if drot_xyz is not None:
+                    delta_rotation = R.from_euler('xyz', drot_xyz)
+                    current_rotation = (
+                        delta_rotation * R.from_quat(current_rotation)).as_quat()
+
+                controller.set_control(current_translation, current_rotation)
+
+                # Handle gripper state changes
+                if self.space_mouse.is_button_pressed(0):
+                    success = self.gripper.grasp(0.01, speed=SPEED, force=FORCE,
+                                                 epsilon_inner=0.005, epsilon_outer=0.005)
+                    if success:
+                        print("Grasp successful")
+                    else:
+                        print("Grasp failed")
+
+                elif self.space_mouse.is_button_pressed(1):
+                    success = self.gripper.move(0.08, speed=SPEED)
+                    if success:
+                        print("Release successful")
+                    else:
+                        print("Release failed")
+
+                # Sleep to maintain loop frequency of 1000 Hz
+                end_time = time.perf_counter()
+                loop_duration = end_time - start_time
+                if loop_duration < 0.001:
+                    time.sleep(0.001 - loop_duration)
+
+        except Exception as e:
+            print(e)
+            running = False
+
+    def init_robot(self):
+        joint_pose = [
+            0.00000000e00,
+            -3.19999993e-01,
+            0.00000000e00,
+            -2.61799383e00,
+            0.00000000e00,
+            2.23000002e00,
+            7.85398185e-01,
+        ]
+
+        self.panda.move_to_joint_position(joint_pose)
+        self.gripper.move(width=0.0, speed=0.1)
+
+        # replicate in sim
+        action = np.zeros((9,))
+        action[:-2] = joint_pose
+
+    # ========= context manager ===========
+
     @property
     def is_ready(self):
-        return self.realsense.is_ready and self.robot.is_ready
+        return self.realsense.is_ready
 
-    def start(self, wait=True):
-        self.realsense.start(wait=False)
-        self.robot.start(wait=False)
+    def start(self, wait=True, exposure_time=5):
+        self.realsense.start(
+            wait=False, put_start_time=time.time() + exposure_time)
+        self.multi_cam_vis.start(wait=False)
+        super().start()
         if wait:
             self.start_wait()
 
-    def stop(self, wait=False):
-        self.end_episode()
-        self.robot.stop(wait=False)
+    def stop(self, wait=True):
         self.realsense.stop(wait=False)
+        self.multi_cam_vis.stop(wait=False)
+        self.join()
         if wait:
             self.stop_wait()
 
     def start_wait(self):
         self.realsense.start_wait()
-        self.robot.start_wait()
+        self.multi_cam_vis.start_wait()
+        self.ready_event.wait()
 
     def stop_wait(self):
-        self.robot.stop_wait()
         self.realsense.stop_wait()
+        self.multi_cam_vis.stop_wait()
 
     # ========= context manager ===========
-
     def __enter__(self):
         self.start()
         return self
@@ -142,9 +230,28 @@ class RealEnv:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
-    # ========= async env API ===========
-    def get_obs(self) -> dict:
-        "observation dict"
+    def get_robot_state(self):
+        obs = dict()
+        gripper_state = self.gripper.read_once()
+        gripper_qpos = gripper_state.width
+
+        obs = np.concatenate(
+            [self.panda.get_position(), self.panda.get_orientation(),
+             [gripper_qpos / 2.0]],
+            dtype=np.float32,  # 15
+        )
+
+        # joint_log = self.panda.get_log().get("q", [])
+        # if not joint_log:
+        #     raise ValueError(
+        #         "Joint state log is empty. Unable to retrieve joint state.")
+
+        obs = {'EEF_state': obs
+               }
+
+        return obs
+
+    def get_obs(self, get_color=True, get_depth=False) -> dict:
         assert self.is_ready
 
         # get data
@@ -153,40 +260,20 @@ class RealEnv:
             k=k,
             out=self.last_realsense_data
         )
-        robot_obs = dict()
-        if self.use_robot:
-            robot_obs['joint_position'] = self.robot.get_state()
-            robot_obs['EE_pose'] = self.robot.get_EE_pose()
-            robot_obs['gripper_state'] = self.robot.get_gripper_state()
 
-            # 125 hz, robot_receive_timestamp
-            last_robot_data = self.robot.get_all_state()
-            # both have more than n_obs_steps data
+        robot_obs = self.get_robot_state()
 
-            # align camera obs timestamps
-            dt = 1 / self.frequency
-            last_timestamp = np.max([x['timestamp'][-1]
-                                    for x in self.last_realsense_data.values()])
-            obs_align_timestamps = last_timestamp - \
-                (np.arange(self.n_obs_steps)[::-1] * dt)
+        dt = 1 / self.obs_fps
+        timestamp_list = [x['timestamp'][-1]
+                          for x in self.last_realsense_data.values()]
+        last_timestamp = np.max(timestamp_list)
+        obs_align_timestamps = last_timestamp - \
+            (np.arange(self.n_obs_steps)[::-1] * dt)
+        # the last timestamp is the latest one
 
-            camera_obs = dict()
-            for camera_idx, value in self.last_realsense_data.items():
-                this_timestamps = value['timestamp']
-                this_idxs = list()
-                for t in obs_align_timestamps:
-                    is_before_idxs = np.nonzero(this_timestamps < t)[0]
-                    this_idx = 0
-                    if len(is_before_idxs) > 0:
-                        this_idx = is_before_idxs[-1]
-                    this_idxs.append(this_idx)
-                # remap key
-                camera_obs[f'camera_{camera_idx}'] = value['color'][this_idxs]
-                # camera_obs['image'] = value['color'][this_idxs]
-
-            # align robot obs
-            robot_timestamps = last_robot_data['robot_receive_timestamp']
-            this_timestamps = robot_timestamps
+        camera_obs = dict()
+        for camera_idx, value in self.last_realsense_data.items():
+            this_timestamps = value['timestamp']
             this_idxs = list()
             for t in obs_align_timestamps:
                 is_before_idxs = np.nonzero(this_timestamps < t)[0]
@@ -194,48 +281,23 @@ class RealEnv:
                 if len(is_before_idxs) > 0:
                     this_idx = is_before_idxs[-1]
                 this_idxs.append(this_idx)
+            # remap key
+            if get_color:
+                assert self.enable_color
+                camera_obs[f'color_img_{camera_idx}'] = value['color'][this_idxs]
+            if get_depth and isinstance(camera_idx, int):
+                assert self.enable_depth
+                camera_obs[f'depth_{camera_idx}'] = value['depth'][this_idxs] / 1000.0
 
-            robot_obs_raw = dict()
-            for k, v in last_robot_data.items():
-                if k in self.obs_key_map:
-                    robot_obs_raw[self.obs_key_map[k]] = v
+        # return obs
+        obs_data = dict(camera_obs)
+        obs_data.update(robot_obs)
+        obs_data['timestamp'] = obs_align_timestamps
 
-            robot_obs = dict()
-            for k, v in robot_obs_raw.items():
-                robot_obs[k] = v[this_idxs]
+        if self.is_recording:
+            self.current_episode.append(obs_data)
 
-            # accumulate obs
-            if self.obs_accumulator is not None:
-                self.obs_accumulator.put(
-                    robot_obs_raw,
-                    robot_timestamps
-                )
-
-            # return obs
-            obs_data = dict(camera_obs)
-            obs_data.update(robot_obs)
-            obs_data['timestamp'] = obs_align_timestamps
-            return obs_data
-
-    def get_robot_state(self):
-        """
-        Get the real robot state.
-        """
-        gripper_state = self.gripper.read_once()
-        gripper_qpos = gripper_state.width
-
-        robot_qpos = np.concatenate(
-            [self.panda.get_log()["q"][-1], [gripper_qpos / 2.0]]
-        )
-
-        obs = np.concatenate(
-            [self.panda.get_position(), self.panda.get_orientation(), robot_qpos],
-            dtype=np.float32,  # 15
-        )
-
-        assert obs.shape == (15,), f"incorrect obs shape, {obs.shape}"
-
-        return obs
+        return obs_data
 
     def log_pose(self, verbose=False):
         while True:
@@ -256,124 +318,44 @@ class RealEnv:
             if elapsed_time < 0.001:
                 time.sleep(0.001 - elapsed_time)
 
-    def step(self, action, visualize=False):
-        """
-        Step robot in the real.
-        """
-        # Simple motion in cartesian space
-        gripper = action[-1] * 0.08
-        euler = action[3:-1]  # Euler angle
-        quat = transforms3d.euler.euler2quat(*euler)
-
-        pose = np.concatenate([action[:3], quat], axis=0)
-        print(pose)
-
-        try:
-            results = self.planner.plan_screw(
-                pose, self.agent.get_qpos(), time_step=0.1
-            )
-            waypoints = results["position"][..., np.newaxis]
-
-            self.panda.move_to_joint_position(
-                waypoints=waypoints, speed_factor=0.1)
-            self.gripper.move(width=gripper, speed=0.3)
-
-            q_pose = np.zeros((9,))
-            q_pose[:-2] = self.panda.q
-            q_pose[-2] = gripper / 2.0
-            q_pose[-1] = gripper / 2.0
-
-            self.agent.set_qpos(q_pose)
-        except Exception as e:
-            print(e)
-            print("Failed to generate valid waypoints.")
-
-        return self.get_obs(visualize=visualize)
-
-    def get_robot_state(self):
-        return self.robot.get_state()
-
     # recording API
-    def start_episode(self, start_time=None):
-        "Start recording and return first obs"
-        if start_time is None:
-            start_time = time.time()
-        self.start_time = start_time
 
-        assert self.is_ready
+    def move_to(self, positions, orientations):
+        self.panda.move_to_pose(positions, orientations)
 
-        # prepare recording stuff
-        episode_id = self.replay_buffer.n_episodes
-        this_video_dir = self.video_dir.joinpath(str(episode_id))
-        this_video_dir.mkdir(parents=True, exist_ok=True)
-        n_cameras = self.realsense.n_cameras
-        video_paths = list()
-        for i in range(n_cameras):
-            video_paths.append(
-                str(this_video_dir.joinpath(f'{i}.mp4').absolute()))
+    def grasp(self):
+        self.gripper.grasp(0.01, speed=SPEED, force=FORCE,
+                           epsilon_inner=0.005, epsilon_outer=0.005)
 
-        # start recording on realsense
-        self.realsense.restart_put(start_time=start_time)
-        self.realsense.start_recording(
-            video_path=video_paths, start_time=start_time)
+    def release(self):
+        self.gripper.move(width=0.08, speed=0.1)
 
-        # create accumulators
-        self.obs_accumulator = TimestampObsAccumulator(
-            start_time=start_time,
-            dt=1/self.frequency
-        )
-        self.action_accumulator = TimestampActionAccumulator(
-            start_time=start_time,
-            dt=1/self.frequency
-        )
-        self.stage_accumulator = TimestampActionAccumulator(
-            start_time=start_time,
-            dt=1/self.frequency
-        )
-        print(f'Episode {episode_id} started!')
+    def start_episode(self):
+        """Start recording an episode."""
+        self.is_recording = True
+        self.current_episode = []
+        print("Recording started.")
 
     def end_episode(self):
-        "Stop recording"
-        assert self.is_ready
-
-        # stop video recorder
-        self.realsense.stop_recording()
-
-        if self.obs_accumulator is not None:
-            # recording
-            assert self.action_accumulator is not None
-            assert self.stage_accumulator is not None
-
-            # Since the only way to accumulate obs and action is by calling
-            # get_obs and exec_actions, which will be in the same thread.
-            # We don't need to worry new data come in here.
-            obs_data = self.obs_accumulator.data
-            obs_timestamps = self.obs_accumulator.timestamps
-
-            actions = self.action_accumulator.actions
-            action_timestamps = self.action_accumulator.timestamps
-            stages = self.stage_accumulator.actions
-            n_steps = min(len(obs_timestamps), len(action_timestamps))
-            if n_steps > 0:
-                episode = dict()
-                episode['timestamp'] = obs_timestamps[:n_steps]
-                episode['action'] = actions[:n_steps]
-                episode['stage'] = stages[:n_steps]
-                for key, value in obs_data.items():
-                    episode[key] = value[:n_steps]
-                self.replay_buffer.add_episode(episode, compressors='disk')
-                episode_id = self.replay_buffer.n_episodes - 1
-                print(f'Episode {episode_id} saved!')
-
-            self.obs_accumulator = None
-            self.action_accumulator = None
-            self.stage_accumulator = None
+        """End recording and save the episode data."""
+        self.is_recording = False
+        episode_file = os.path.join(
+            self.output_dir, f'episode_{self.episode_counter}.pkl')
+        with open(episode_file, 'wb') as f:
+            pickle.dump(self.current_episode, f)
+        print(f"Recording stopped. Episode saved to {episode_file}")
+        self.episode_counter += 1
 
     def drop_episode(self):
-        self.end_episode()
-        self.replay_buffer.drop_episode()
-        episode_id = self.replay_buffer.n_episodes
-        this_video_dir = self.video_dir.joinpath(str(episode_id))
-        if this_video_dir.exists():
-            shutil.rmtree(str(this_video_dir))
-        print(f'Episode {episode_id} dropped!')
+        """Delete the most recently saved episode."""
+        if self.episode_counter > 0:
+            self.episode_counter -= 1
+            episode_file = os.path.join(
+                self.output_dir, f'episode_{self.episode_counter}.pkl')
+            if os.path.exists(episode_file):
+                os.remove(episode_file)
+                print(f"Episode {self.episode_counter} deleted.")
+            else:
+                print("No episode file found to delete.")
+        else:
+            print("No episodes to delete.")

@@ -10,12 +10,16 @@ import cv2
 from multiprocessing.managers import SharedMemoryManager
 from utils.robot.real_robot import RealEnv
 from utils.precise_sleep import precise_wait
+import pickle
+import os
+from pathlib import Path
 
 from utils.inputs.keystroke_counter import (
     KeystrokeCounter, Key, KeyCode
 )
 import scipy.spatial.transform as st
 import click
+MOVE_INCREMENT = 0.005
 
 
 @click.command()
@@ -26,9 +30,11 @@ import click
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SpaceMouse command to executing on Robot in Sec.")
 def main(output, robot_ip, init_joints, frequency, command_latency):
     dt = 1 / frequency
+    output_path = Path(output)
+    observations = []  # List to store observations
+
     with SharedMemoryManager() as shm_manager:
         with KeystrokeCounter() as key_counter, \
-                Spacemouse(shm_manager=shm_manager) as sm, \
                 RealEnv(
                     output_dir=output,
                     robot_ip=robot_ip,
@@ -36,6 +42,7 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
                     obs_fps=frequency,
                     init_joints=init_joints,
         ) as env:
+            # super.__init__()
 
             cv2.setNumThreads(1)
 
@@ -44,9 +51,6 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
             # realsense white balance
             env.realsense.set_white_balance(white_balance=3900)
             # env.robot.start()
-            state = env.get_robot_state()
-            target_pose = state['ActualTCPPose']
-            print("ActualTCPPose", target_pose)
 
             time.sleep(2.0)
             t_start = time.monotonic()
@@ -55,8 +59,6 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
             is_recording = False
             while not stop:
 
-                state = env.get_robot_state()
-
                 # calculate timing
                 t_cycle_end = t_start + (iter_idx + 1) * dt
                 t_sample = t_cycle_end - command_latency
@@ -64,8 +66,8 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
 
                 # pump obs
                 obs = env.get_obs()
+                observations.append(obs)
 
-                # handle key presses
                 press_events = key_counter.get_press_events()
                 for key_stroke in press_events:
                     if key_stroke == KeyCode(char='q'):
@@ -94,57 +96,19 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
                         # delete
                 stage = key_counter[Key.space]
 
-                # # visualize
-                # vis_img = obs[f'camera_{vis_camera_idx}'][-1,
-                #                                           :, :, ::-1].copy()
-                # episode_id = env.replay_buffer.n_episodes
-                # text = f'Episode: {episode_id}, Stage: {stage}'
-                # if is_recording:
-                #     text += ', Recording!'
-                # cv2.putText(
-                #     vis_img,
-                #     text,
-                #     (10, 30),
-                #     fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                #     fontScale=1,
-                #     thickness=2,
-                #     color=(255, 255, 255)
-                # )
-
-                # cv2.imshow('default', vis_img)
-                # cv2.pollKey()
-
-                precise_wait(t_sample)
                 # get teleop command
-                sm_state = sm.get_motion_state_transformed()
-                # print(sm_state)
-                dpos = sm_state[:3] * (env.max_pos_speed)
-                drot_xyz = sm_state[3:] * (env.max_rot_speed)
+                precise_wait(t_sample)
 
-                drot_xyz[:] = 0
-                if sm.is_button_pressed(0):
-                    env.robot.panda.grip()
-
-                elif sm.is_button_pressed(1):
-                    env.robot.panda.release()
-
-                drot = st.Rotation.from_euler('xyz', drot_xyz)
-
-                target_pose[:3] += dpos
-                target_pose[3:] = (drot * st.Rotation.from_rotvec(
-                    target_pose[3:])).as_rotvec()
-                # sprint("target_pose", target_pose)
-
-                # execute teleop command
-                env.step(
-                    actions=[target_pose],
-                    timestamps=[t_command_target -
-                                time.monotonic() + time.time()],
-                    stages=[stage])
                 precise_wait(t_cycle_end)
                 iter_idx += 1
 
+            # Save to pickle file
+            pkl_path = output_path / 'observations.pkl'
+            with open(pkl_path, 'wb') as f:
+                pickle.dump(observations, f)
+            print(f"Saved observations to {pkl_path}")
 
-# %%
+
+            # %%
 if __name__ == '__main__':
     main()

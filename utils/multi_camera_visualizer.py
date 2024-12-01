@@ -50,26 +50,11 @@ class MultiCameraVisualizer(mp.Process):
         vis_data = None
         vis_img = None
         while not self.stop_event.is_set():
-            vis_data = self.realsense.get_vis(out=vis_data)
-            color = vis_data['color']
-            N, H, W, C = color.shape
+            vis_data = self.realsense.get(out=vis_data)
+            color = vis_data[0]['color']
+            H, W, C = color.shape
             assert C == 3
-            oh = H * self.row
-            ow = W * self.col
-            if vis_img is None:
-                vis_img = np.full((oh, ow, 3),
-                                  fill_value=self.fill_value, dtype=np.uint8)
-            for row in range(self.row):
-                for col in range(self.col):
-                    idx = col + row * self.col
-                    h_start = H * row
-                    h_end = h_start + H
-                    w_start = W * col
-                    w_end = w_start + W
-                    if idx < N:
-                        # opencv uses bgr
-                        vis_img[h_start:h_end, w_start:w_end
-                                ] = color[idx, :, :, channel_slice]
+            vis_img = color  # Assign the color image to vis_img
             cv2.imshow(self.window_name, vis_img)
             cv2.pollKey()
             time.sleep(1 / self.vis_fps)
