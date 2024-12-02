@@ -34,15 +34,18 @@ import os
 from utils.inputs.spacemouse_shared_memory import Spacemouse
 import multiprocessing as mp
 import pickle
+from utils.shared_memory.shared_memory_ring_buffer import (
+    SharedMemoryRingBuffer,
+)
 
 cameras = {
     "wrist_cam": "",
     "right_cam": "",
     "left_cam": "",
 }
-SPEED = 0.05  # [m/s]
+SPEED = 0.1  # [m/s]
 FORCE = 20.0  # [N]
-MOVE_INCREMENT = 0.0002
+MOVE_INCREMENT = 0.005
 
 
 class RealEnv(mp.Process):
@@ -75,10 +78,24 @@ class RealEnv(mp.Process):
         self.gripper = libfranka.Gripper(robot_ip)
         self.panda.enable_logging(int(10))
 
+        Robot_state = {
+            # [x,y,z, qx,qy,qz,qw, gripper]
+            'EEF_state': np.zeros(8, dtype=np.float32),
+            'timestamp': np.array([time.time()], dtype=np.float64)
+        }
+
         self.serial_numbers = SingleRealsense.get_connected_devices_serial()
 
         self.shm_manager = SharedMemoryManager()
         self.shm_manager.start()
+
+        self.Robot_state_buffer = SharedMemoryRingBuffer.create_from_examples(
+            shm_manager=self.shm_manager,
+            examples=Robot_state,
+            get_max_k=30,  # Store last 30 states
+            get_time_budget=0.2,
+            put_desired_frequency=self.obs_fps
+        )
 
         self.space_mouse = Spacemouse(
             shm_manager=self.shm_manager, deadzone=0.3)
@@ -118,6 +135,10 @@ class RealEnv(mp.Process):
 
     # ======== start-stop API =============
 
+    def put_state(self, state_data):
+        """Put new state data into ring buffer"""
+        self.Robot_state_buffer.put(state_data)
+
     def run(self):
 
         try:
@@ -128,7 +149,7 @@ class RealEnv(mp.Process):
             current_translation = self.panda.get_position()
             sm_state = self.space_mouse.get_motion_state_transformed()
 
-            ctx = self.panda.create_context(frequency=300)
+            ctx = self.panda.create_context(frequency=1000)
             controller = panda_py.controllers.CartesianImpedance()
             self.panda.start_controller(controller)
             time.sleep(1)
@@ -140,6 +161,7 @@ class RealEnv(mp.Process):
                 dpos = sm_state[:3] * MOVE_INCREMENT
                 drot_xyz = sm_state[3:] * MOVE_INCREMENT * 3
                 drot_xyz[:] = 0
+                state_data = self.get_state()
 
                 current_translation += np.array([dpos[0], dpos[1], dpos[2]])
                 if drot_xyz is not None:
@@ -151,8 +173,8 @@ class RealEnv(mp.Process):
 
                 # Handle gripper state changes
                 if self.space_mouse.is_button_pressed(0):
-                    success = self.gripper.grasp(0.01, speed=SPEED, force=FORCE,
-                                                 epsilon_inner=0.005, epsilon_outer=0.005)
+                    success = self.gripper.grasp(0.03, speed=SPEED, force=FORCE,
+                                                 epsilon_inner=0.05, epsilon_outer=0.05)
                     if success:
                         print("Grasp successful")
                     else:
@@ -167,9 +189,7 @@ class RealEnv(mp.Process):
 
                 # Sleep to maintain loop frequency of 1000 Hz
                 end_time = time.perf_counter()
-                loop_duration = end_time - start_time
-                if loop_duration < 0.001:
-                    time.sleep(0.001 - loop_duration)
+                self.put_state(state_data)
 
         except Exception as e:
             print(e)
@@ -225,13 +245,22 @@ class RealEnv(mp.Process):
         self.stop()
 
     def get_robot_state(self):
+        """Get latest state from ring buffer"""
+        try:
+            state = self.Robot_state_buffer.get()
+            return state
+        except Exception as e:
+            print(f"Error getting state from buffer: {e}")
+            return None
+
+    def get_state(self):
         obs = dict()
         gripper_state = self.gripper.read_once()
-        gripper_qpos = gripper_state.width
+        gripper_qpos = gripper_state.is_grasped
 
         obs = np.concatenate(
             [self.panda.get_position(), self.panda.get_orientation(),
-             [gripper_qpos / 2.0]],
+             [gripper_qpos]],
             dtype=np.float32,  # 15
         )
 
@@ -318,8 +347,8 @@ class RealEnv(mp.Process):
         self.panda.move_to_pose(positions, orientations)
 
     def grasp(self):
-        self.gripper.grasp(0.01, speed=SPEED, force=FORCE,
-                           epsilon_inner=0.005, epsilon_outer=0.005)
+        self.gripper.grasp(0.03, speed=SPEED, force=FORCE,
+                           epsilon_inner=0.3, epsilon_outer=0.3)
 
     def release(self):
         self.gripper.move(width=0.08, speed=0.1)

@@ -117,55 +117,60 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
                         key_listener.init_robot_flag = False  # Reset the flag
 
                     if key_listener.save_data:
-                        # Create directories for images and state data
-                        episode_dir = output_path / \
-                            f'episode_{episode_counter}'
-                        images_dir = episode_dir / 'images'
-                        states_dir = episode_dir / 'states'
-                        images_dir.mkdir(parents=True, exist_ok=True)
-                        states_dir.mkdir(parents=True, exist_ok=True)
+                        # Find the next available index
+                        existing_images = list(output_path.glob('*.png'))
+                        existing_states = list(output_path.glob('*.txt'))
+                        existing_files = existing_images + existing_states
+                        if existing_files:
+                            indices = []
+                            for f in existing_files:
+                                try:
+                                    # Get first 3 chars as number
+                                    index = int(f.stem[:3])
+                                    indices.append(index)
+                                except ValueError:
+                                    continue
+                            next_index = max(indices) + 1 if indices else 1
+                        else:
+                            next_index = 1
 
-                        # Save images and state data separately
-                        # Save images
+                        # Format index as 3 digits
+                        index_str = f"{next_index:03d}"
+
+                        # Save image
                         for cam_key, image in obs.items():
                             if 'color_img_0' in cam_key:
                                 try:
-                                    # Remove extra dimension if present
                                     if image.ndim == 4:
                                         image = np.squeeze(image, axis=0)
 
-                                    # Check if the image now has valid dimensions
                                     if image.ndim == 3 and image.shape[2] == 3:
-                                        image_filename = images_dir / \
-                                            f'{cam_key}.png'
+                                        image_filename = output_path / \
+                                            f"{index_str}.png"
                                         cv2.imwrite(str(image_filename), image)
-                                    else:
-                                        print(
-                                            f"Invalid image dimensions after processing for {cam_key}: {image.shape}")
                                 except Exception as e:
-                                    print(f"Error saving image {cam_key}: {e}")
+                                    print(f"Error saving image: {e}")
 
-                        # Save state data
-                        state_data = obs.get('EEF_state', None)
-                        if state_data is not None:
-                            # Extract translation, quaternion, and gripper state
-                            translation = state_data[:3]
-                            quaternion = state_data[3:7]
-                            gripper_state = state_data[7]
-                            # Convert quaternion to rotation vector
+                        # Save state
+                        current_state = obs.get('EEF_state', None)
+                        if current_state is not None:
+                            translation = current_state[:3]
+                            quaternion = current_state[3:7]
+                            gripper_state = current_state[7]
                             rotation_vector = R.from_quat(
                                 quaternion).as_rotvec()
-                            # Combine translation, rotation vector, and gripper state
                             state_combined = np.concatenate(
                                 (translation, rotation_vector, [gripper_state]))
-                            state_filename = states_dir / 'state.txt'
-                            np.savetxt(state_filename,
-                                       state_combined, fmt='%.6f')
 
-                        print(f"Saved images to {images_dir}")
-                        print(f"Saved state data to {states_dir}")
-                        episode_counter += 1  # Increment for the next episode
-                        key_listener.save_data = False  # Reset the flag
+                            state_filename = output_path / f"{index_str}.txt"
+                            with open(state_filename, 'w') as f:
+                                f.write(
+                                    f"# Translation [x y z], Rotation [rx ry rz], Gripper\n")
+                                np.savetxt(f, [state_combined], fmt='%.6f')
+
+                            print(
+                                f"Saved image and state with index {index_str}")
+                            key_listener.save_data = False
 
                 iter_idx += 1
 
