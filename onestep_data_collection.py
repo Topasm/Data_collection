@@ -164,8 +164,6 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
 
                             state_filename = output_path / f"{index_str}.txt"
                             with open(state_filename, 'w') as f:
-                                f.write(
-                                    f"# Translation [x y z], Rotation [rx ry rz], Gripper\n")
                                 np.savetxt(f, [state_combined], fmt='%.6f')
 
                             print(
