@@ -95,7 +95,7 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
             # Realsense exposure
             env.realsense.set_exposure(exposure=120, gain=0)
             # Realsense white balance
-            env.realsense.set_white_balance(white_balance=3900)
+            env.realsense.set_white_balance(white_balance=3500)
 
             time.sleep(2.0)
             t_start = time.monotonic()
@@ -113,7 +113,7 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
 
                 with key_listener.lock:
                     if key_listener.init_robot_flag:
-                        env.init_robot()
+                        # env.init_robot()
                         key_listener.init_robot_flag = False  # Reset the flag
 
                     if key_listener.save_data:
@@ -146,7 +146,7 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
 
                                     if image.ndim == 3 and image.shape[2] == 3:
                                         image_filename = output_path / \
-                                            f"{index_str}.png"
+                                            f"{index_str}.jpg"
                                         cv2.imwrite(str(image_filename), image)
                                 except Exception as e:
                                     print(f"Error saving image: {e}")

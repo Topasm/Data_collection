@@ -200,7 +200,7 @@ class RealEnv(mp.Process):
                       2.28398158, 0.0769999, 2.02505396, 0.07858208]
 
         self.panda.move_to_joint_position(joint_pose)
-        self.gripper.move(width=0.8, speed=0.1)
+        # self.gripper.move(width=0.8, speed=0.1)
 
         # replicate in sim
         action = np.zeros((9,))

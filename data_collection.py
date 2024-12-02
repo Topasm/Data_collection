@@ -123,7 +123,7 @@ def main(output, robot_ip, init_joints, frequency, command_latency):
                         observations.append(obs)
 
                     if key_listener.init_robot_flag:
-                        env.init_robot()
+                        # env.init_robot()
                         key_listener.init_robot_flag = False  # Reset the flag
 
                     if key_listener.save_data:
